@@ -1,4 +1,3 @@
-
 // ---------------------------------------------------------------------------
 // Radius Azure ACI Key Vault Secrets Recipe
 // ---------------------------------------------------------------------------
@@ -18,17 +17,25 @@ param location string = resourceGroup().location
 // Variables
 // ---------------------------------------------------------------------------
 
-// Names derived from the Radius resource name to keep deployments deterministic.
-var keyVaultName = 'kv-${context.resource.name}'
+// Uses a short prefix + uniqueString hash to stay within the 3–24 char Key Vault name limit.
+var keyVaultName = 'kv-${take(context.resource.name, 7)}-${uniqueString(context.resource.name)}'
 var identityName = context.resource.name
 
 // Secret data sourced entirely from the Radius context object – not hardcoded.
-var secretData = context.resource.properties.data
+// Falls back to an empty object when data is missing or null.
+var secretData = contains(context.resource.properties, 'data') && context.resource.properties.data != null ? context.resource.properties.data : {}
 
-// Flatten the map into an array suitable for Bicep resource loops.
-var secretItems = [for item in items(secretData): {
+// Resolves the raw secret value with null safety.
+var rawSecretValues = [for item in items(secretData): {
   name: item.key
-  value: item.value.value
+  rawValue: item.value != null && contains(item.value, 'value') && item.value.value != null ? item.value.value : ''
+  needsBase64: item.value != null && contains(item.value, 'encoding') && item.value.encoding == 'base64'
+}]
+
+// If encoding is 'base64', the plain-text value is base64-encoded before storage.
+var secretItems = [for item in rawSecretValues: {
+  name: item.name
+  value: item.needsBase64 ? base64(item.rawValue) : item.rawValue
 }]
 
 // Built-in role: Key Vault Administrator – grants full access to all Key Vault data-plane operations.
@@ -124,11 +131,16 @@ output userAssignedIdentityClientId string = uai.properties.clientId
 output userAssignedIdentityPrincipalId string = uai.properties.principalId
 
 // Radius recipe result 
-// The UAI resource ID is included so the Radius CP can track it and
-// downstream ACI container recipes can reference it for identity assignment.
 output result object = {
   resources: [
     uai.id
+    keyVault.id
   ]
+  values: {
+    keyVaultId: keyVault.id
+    userAssignedIdentityId: uai.id
+    userAssignedIdentityClientId: uai.properties.clientId
+    userAssignedIdentityPrincipalId: uai.properties.principalId
+  }
 }
 
