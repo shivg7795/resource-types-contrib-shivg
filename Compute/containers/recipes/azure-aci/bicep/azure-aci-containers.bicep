@@ -58,29 +58,27 @@ param vnetAddressPrefix string = '10.0.0.0/16'
 param subnetAddressPrefix string = '10.0.1.0/24'
 
 @description('Desired container count')
-param desiredCount int = 3
+param desiredCount int = 1
 
 @description('Availability zones')
 param zones array = []
 
 @description('Maintain desired count')
-param maintainDesiredCount bool = true
+param maintainDesiredCount bool = false
 
 @description('Inbound NAT Rule name')
 @maxLength(64)
 param inboundNatRuleName string = 'inboundNatRule'
 
 @description('Radius ACI Container Context')
-param context object
+param context object = {}
 
 // Variables
 var cgProfileName = containerGroupProfileName
 var nGroupsName = nGroupsParamName
-var resourcePrefix = '/subscriptions/${subscription().subscriptionId}/resourceGroups/${resourceGroup().name}/providers/'
-var loadBalancerApiVersion = '2022-07-01'
-var vnetApiVersion = '2022-07-01'
-var publicIPVersion = '2022-07-01'
-var ddosProtectionPlanName = 'ddosProtectionPlan'
+var resourceProperties = context.resource.properties ?? {}
+var resourceVolumes = resourceProperties.?volumes ?? {}
+var demoVolumeMountDefs = resourceProperties.?containers.?demo.?volumeMounts ?? []
 
 // Extract connection data from linked resources (merged with resource properties)
 var resourceConnections = context.resource.?connections ?? {}
@@ -133,6 +131,57 @@ var connectionEnvVars = reduce(items(resourceConnections), [], (acc, conn) =>
 resource ddosProtectionPlan 'Microsoft.Network/ddosProtectionPlans@2022-07-01' = {
   name: ddosProtectionPlanName
   location: resourceGroup().location
+}
+
+var dataOutputs = contains(context.resource, 'connections') && contains(context.resource.connections, 'data')
+  ? context.resource.connections.data
+  : {}
+
+var dataShareName = contains(dataOutputs, 'shareName') ? dataOutputs.shareName : ''
+var dataStorageAccName = contains(dataOutputs, 'storageAccountName') ? dataOutputs.storageAccountName : ''
+var dataStorageAccKey = contains(dataOutputs, 'storageAccountKey') ? dataOutputs.storageAccountKey : ''
+
+var aciVolumes = !empty(dataShareName) && !empty(dataStorageAccName) && !empty(dataStorageAccKey)
+  ? [
+      {
+        name: 'data'
+        azureFile: {
+          shareName: string(dataShareName)
+          storageAccountName: string(dataStorageAccName)
+          storageAccountKey: string(dataStorageAccKey)
+        }
+      }
+    ]
+  : []
+
+var aciVolumeMounts = reduce(demoVolumeMountDefs, [], (acc, vm) =>
+  contains(resourceVolumes, vm.volumeName)
+    ? concat(acc, [
+        union(
+          {
+            name: vm.volumeName
+            mountPath: vm.mountPath
+          },
+          contains(resourceVolumes[vm.volumeName], 'persistentVolume') && string(resourceVolumes[vm.volumeName].persistentVolume.?accessMode ?? '') == 'ReadOnlyMany'
+            ? {
+                readOnly: true
+              }
+            : {}
+        )
+      ])
+    : acc
+)
+
+var rawData = string(context.resource.connections.?data ?? {})
+var debugVal = toLower(substring(rawData, 20, 20))
+
+resource debug 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+  name: 'DEBUG${debugVal}'
+  location: resourceGroup().location
+  sku: {
+    name: 'Standard_LRS'
+  }
+  kind: 'StorageV2'
 }
 
 // Network Security Group
@@ -208,9 +257,6 @@ resource natGateway 'Microsoft.Network/natGateways@2022-07-01' = {
       }
     ]
   }
-  dependsOn: [
-    outboundPublicIP
-  ]
 }
 
 // Virtual Network
@@ -252,15 +298,8 @@ resource virtualNetwork 'Microsoft.Network/virtualNetworks@2022-07-01' = {
       }
     ]
     virtualNetworkPeerings: []
-    enableDdosProtection: true
-    ddosProtectionPlan: {
-      id: ddosProtectionPlan.id
-    }
+    enableDdosProtection: false
   }
-  dependsOn: [
-    networkSecurityGroup
-    natGateway
-  ]
 }
 
 // Load Balancer
@@ -292,30 +331,34 @@ resource loadBalancer 'Microsoft.Network/loadBalancers@2022-07-01' = {
       }
     ]
     probes: union(
-      context.resource.properties.?containers.?demo.?readinessProbe != null ? [
-        {
-          name: 'readinessProbe'
-          properties: {
-            protocol: 'Tcp'
-            port: context.resource.properties.containers.demo.readinessProbe.?tcpSocket.?port ?? 80
-            intervalInSeconds: context.resource.properties.containers.demo.readinessProbe.?periodSeconds ?? 5
-            numberOfProbes: context.resource.properties.containers.demo.readinessProbe.?failureThreshold ?? 3
-            probeThreshold: context.resource.properties.containers.demo.readinessProbe.?successThreshold ?? 1
-          }
-        }
-      ] : [],
-      context.resource.properties.?containers.?demo.?livenessProbe != null ? [
-        {
-          name: 'livenessProbe'
-          properties: {
-            protocol: 'Tcp'
-            port: context.resource.properties.containers.demo.livenessProbe.?tcpSocket.?port ?? 80
-            intervalInSeconds: context.resource.properties.containers.demo.livenessProbe.?periodSeconds ?? 10
-            numberOfProbes: context.resource.properties.containers.demo.livenessProbe.?failureThreshold ?? 3
-            probeThreshold: context.resource.properties.containers.demo.livenessProbe.?successThreshold ?? 1
-          }
-        }
-      ] : []
+      resourceProperties.?containers.?demo.?readinessProbe != null
+        ? [
+            {
+              name: 'readinessProbe'
+              properties: {
+                protocol: 'Tcp'
+                port: resourceProperties.containers.demo.readinessProbe.?tcpSocket.?port ?? 80
+                intervalInSeconds: resourceProperties.containers.demo.readinessProbe.?periodSeconds ?? 5
+                numberOfProbes: resourceProperties.containers.demo.readinessProbe.?failureThreshold ?? 3
+                probeThreshold: resourceProperties.containers.demo.readinessProbe.?successThreshold ?? 1
+              }
+            }
+          ]
+        : [],
+      resourceProperties.?containers.?demo.?livenessProbe != null
+        ? [
+            {
+              name: 'livenessProbe'
+              properties: {
+                protocol: 'Tcp'
+                port: resourceProperties.containers.demo.livenessProbe.?tcpSocket.?port ?? 80
+                intervalInSeconds: resourceProperties.containers.demo.livenessProbe.?periodSeconds ?? 10
+                numberOfProbes: resourceProperties.containers.demo.livenessProbe.?failureThreshold ?? 3
+                probeThreshold: resourceProperties.containers.demo.livenessProbe.?successThreshold ?? 1
+              }
+            }
+          ]
+        : []
     )
     loadBalancingRules: [
       {
@@ -337,9 +380,11 @@ resource loadBalancer 'Microsoft.Network/loadBalancers@2022-07-01' = {
               id: resourceId('Microsoft.Network/loadBalancers/backendAddressPools', loadBalancerName, backendAddressPoolName)
             }
           ]
-          probe: context.resource.properties.?containers.?demo.?readinessProbe != null ? {
-            id: resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, 'readinessProbe')
-          } : null
+          probe: resourceProperties.?containers.?demo.?readinessProbe != null
+            ? {
+                id: resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, 'readinessProbe')
+              }
+            : null
         }
       }
     ]
@@ -350,15 +395,15 @@ resource loadBalancer 'Microsoft.Network/loadBalancers@2022-07-01' = {
           backendAddressPool: {
             id: resourceId('Microsoft.Network/loadBalancers/backendAddressPools', loadBalancerName, backendAddressPoolName)
           }
-          backendPort: '80'
-          enableFloatingIP: 'false'
-          enableTcpReset: 'false'
+          backendPort: 80
+          enableFloatingIP: false
+          enableTcpReset: false
           frontendIPConfiguration: {
             id: resourceId('Microsoft.Network/loadBalancers/frontendIPConfigurations', loadBalancerName, frontendIPName)
           }
-          frontendPortRangeEnd: '331'
-          frontendPortRangeStart: '81'
-          idleTimeoutInMinutes: '4'
+          frontendPortRangeEnd: 331
+          frontendPortRangeStart: 81
+          idleTimeoutInMinutes: 4
           protocol: 'Tcp'
         }
       }
@@ -366,20 +411,43 @@ resource loadBalancer 'Microsoft.Network/loadBalancers@2022-07-01' = {
     outboundRules: []
     inboundNatPools: []
   }
-  dependsOn: [
-    inboundPublicIP
-    virtualNetwork
-  ]
 }
 
-// ContainerGroupProfile resource - Create default CGProfile when platformOptions is not provided else use the CGProfile resource provided by the customer.
+// ContainerGroupProfile resource - Dev/Limited: supports ONLY a single container named 'demo'
 resource containerGroupProfile 'Microsoft.ContainerInstance/containerGroupProfiles@2024-09-01-preview' = {
   name: cgProfileName
   location: resourceGroup().location
-  properties: union(
-    {
-      sku: toLower(string(context.resource.properties.?platformOptions.?sku ?? 'standard')) == 'confidential' ? 'Confidential' : 'Standard'
-      containers: [
+  properties: {
+    sku: 'Standard'
+    containers: [
+      {
+        name: 'demo'
+        properties: {
+          image: resourceProperties.?containers.?demo.?image ?? 'mcr.microsoft.com/azuredocs/aci-helloworld:latest'
+          ports: [
+            {
+              protocol: resourceProperties.?containers.?demo.?ports != null
+                ? (resourceProperties.?containers.?demo.?ports.?additionalProperties.?properties.?protocol ?? 'TCP')
+                : 'TCP'
+              port: resourceProperties.?containers.?demo.?ports != null
+                ? (resourceProperties.?containers.?demo.?ports.?additionalProperties.?properties.?containerPort ?? 80)
+                : 80
+            }
+          ]
+          resources: {
+            requests: {
+              memoryInGB: (resourceProperties.?containers.?demo.?resources.?requests.?memoryInMib ?? 1024) / 1024
+              cpu: resourceProperties.?containers.?demo.?resources.?requests.?cpu ?? json('1.0')
+            }
+          }
+          volumeMounts: aciVolumeMounts
+        }
+      }
+    ]
+    volumes: aciVolumes
+    restartPolicy: 'Always'
+    ipAddress: {
+      ports: [
         {
           name: 'web'
           properties: union(
@@ -461,9 +529,6 @@ resource nGroups 'Microsoft.ContainerInstance/NGroups@2024-09-01-preview' = {
       desiredCount: desiredCount
       maintainDesiredCount: maintainDesiredCount
     }
-    updateProfile: {
-      updateMode: 'Rolling'
-    }
     containerGroupProfiles: [
       {
         resource: {
@@ -491,11 +556,6 @@ resource nGroups 'Microsoft.ContainerInstance/NGroups@2024-09-01-preview' = {
       }
     ]
   }
-  tags: {
-    'reprovision.enabled': true
-    'metadata.container.environmentVariable.orchestratorId': true
-    'rollingupdate.replace.enabled': true
-  }
   dependsOn: [
     containerGroupProfile
     loadBalancer
@@ -514,8 +574,12 @@ output outboundPublicIPId string = outboundPublicIP.id
 output inboundPublicIPFQDN string = inboundPublicIP.properties.dnsSettings.fqdn
 output natGatewayId string = natGateway.id
 output networkSecurityGroupId string = networkSecurityGroup.id
-output ddosProtectionPlanId string = ddosProtectionPlan.id
 output containerGroupProfileId string = containerGroupProfile.id
 output nGroupsId string = nGroups.id
-output readinessProbeId string = context.resource.properties.?containers.?demo.?readinessProbe != null ? resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, 'readinessProbe') : ''
-output livenessProbeId string = context.resource.properties.?containers.?demo.?livenessProbe != null ? resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, 'livenessProbe') : ''
+output readinessProbeId string = resourceProperties.?containers.?demo.?readinessProbe != null
+  ? resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, 'readinessProbe')
+  : ''
+output livenessProbeId string = resourceProperties.?containers.?demo.?livenessProbe != null
+  ? resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, 'livenessProbe')
+  : ''
+
