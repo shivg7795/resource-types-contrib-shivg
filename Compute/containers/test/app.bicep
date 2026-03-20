@@ -13,7 +13,7 @@ param password string = 'c2VjcmV0cGFzc3dvcmQ='
 #disable-next-line secure-parameter-default @secure()
 param apiKey string = 'abc123xyz'
 
-resource app 'Radius.Core/applications@2025-08-01-preview' = {
+resource app 'Applications.Core/applications@2023-10-01-preview' = {
   name: 'containers-testapp'
   properties: {
     environment: environment
@@ -37,11 +37,9 @@ resource myContainer 'Radius.Compute/containers@2025-08-01-preview' = {
       }
     }
     containers: {
-      web: {
-        image: 'nginx:alpine'
+      demo: {
+        image: 'mcr.microsoft.com/azuredocs/aci-helloworld:latest'
         command: ['/bin/sh', '-c']
-        args: ['nginx -g "daemon off;"']
-        workingDir: '/usr/share/nginx/html'
         ports: {
           http: {
             containerPort: 80
@@ -90,12 +88,12 @@ resource myContainer 'Radius.Compute/containers@2025-08-01-preview' = {
         ] 
         resources: {
           requests: {
-            cpu: '0.1'       
-            memoryInMib: 128   
+            cpu: '1.0'       
+            memoryInMib: 1024   
           }
           limits: {
-            cpu: '0.5'
-            memoryInMib: 512
+            cpu: '2.0'
+            memoryInMib: 2048
           }
         }
         livenessProbe: {
@@ -121,7 +119,7 @@ resource myContainer 'Radius.Compute/containers@2025-08-01-preview' = {
       }
       init: {
         initContainer: true
-        image: 'busybox:latest'
+        image: 'mcr.microsoft.com/azure-cli:latest'
         command: ['sh', '-c']
         args: ['echo "Initializing..." && sleep 5']
         workingDir: '/tmp'
@@ -132,8 +130,8 @@ resource myContainer 'Radius.Compute/containers@2025-08-01-preview' = {
         }
         resources: {
           requests: {
-            cpu: '0.1'
-            memoryInMib: 64
+            cpu: '1.0'
+            memoryInMib: 1024
           }
         }
       }
