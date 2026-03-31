@@ -71,7 +71,7 @@ param maintainDesiredCount bool = false
 param inboundNatRuleName string = 'inboundNatRule'
 
 @description('Radius ACI Container Context')
-param context object = {}
+param context object
 
 // Variables
 var cgProfileName = containerGroupProfileName
@@ -241,7 +241,7 @@ resource natGateway 'Microsoft.Network/natGateways@2022-07-01' = {
         id: outboundPublicIP.id
       }
     ]
-  }
+  }  
   dependsOn: [
     outboundPublicIP
   ]
@@ -285,7 +285,7 @@ resource virtualNetwork 'Microsoft.Network/virtualNetworks@2022-07-01' = {
         type: 'Microsoft.Network/virtualNetworks/subnets'
       }
     ]
-    virtualNetworkPeerings: []
+    virtualNetworkPeerings: []    
     enableDdosProtection: true
     ddosProtectionPlan: {
       id: ddosProtectionPlan.id
@@ -405,7 +405,7 @@ resource loadBalancer 'Microsoft.Network/loadBalancers@2022-07-01' = {
     ]
     outboundRules: []
     inboundNatPools: []
-  }
+  }  
   dependsOn: [
     inboundPublicIP
     virtualNetwork
@@ -532,7 +532,7 @@ resource nGroups 'Microsoft.ContainerInstance/NGroups@2024-09-01-preview' = {
         }
       }
     ]
-  }
+  }  
   tags: {
     'reprovision.enabled': true
     'metadata.container.environmentVariable.orchestratorId': true
