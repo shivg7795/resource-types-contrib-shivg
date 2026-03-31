@@ -21,9 +21,26 @@ param location string = resourceGroup().location
 var keyVaultName = 'kv-${take(context.resource.name, 7)}-${uniqueString(context.resource.name)}'
 var identityName = context.resource.name
 
+// If secretKind is not set, set to 'generic'
+var secretKind = context.resource.properties.?kind ?? 'generic'
+
 // Secret data sourced entirely from the Radius context object – not hardcoded.
 // Falls back to an empty object when data is missing or null.
 var secretData = contains(context.resource.properties, 'data') && context.resource.properties.data != null ? context.resource.properties.data : {}
+
+// Validate required fields for secret kinds (matching K8s recipe parity)
+var missingFields = secretKind == 'certificate-pem' && (!contains(secretData, 'tls.crt') || !contains(secretData, 'tls.key')) 
+  ? 'certificate-pem secrets must contain keys `tls.crt` and `tls.key`'
+  : secretKind == 'basicAuthentication' && (!contains(secretData, 'username') || !contains(secretData, 'password'))
+  ? 'basicAuthentication secrets must contain keys `username` and `password`'
+  : secretKind == 'azureWorkloadIdentity' && (!contains(secretData, 'clientId') || !contains(secretData, 'tenantId'))
+  ? 'azureWorkloadIdentity secrets must contain keys `clientId` and `tenantId`'
+  : secretKind == 'awsIRSA' && !contains(secretData, 'roleARN')
+  ? 'awsIRSA secrets must contain key `roleARN`'
+  : ''
+
+// Use the validation error as the vault name to surface it clearly during deployment
+var effectiveKeyVaultName = length(missingFields) > 0 ? missingFields : keyVaultName
 
 // Resolves the raw secret value with null safety.
 var rawSecretValues = [for item in items(secretData): {
@@ -52,7 +69,7 @@ var roleAssignmentName = guid(keyVault.id, uai.id, keyVaultAdministratorRoleId)
 // govern data-plane access.
 
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
-  name: keyVaultName
+  name: effectiveKeyVaultName
   location: location
   tags: {
     'radius-resource': context.resource.name
@@ -121,6 +138,9 @@ resource kvSecrets 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = [for secret 
 @description('Resource ID of the created Azure Key Vault.')
 output keyVaultId string = keyVault.id
 
+@description('URI of the created Azure Key Vault (used by Azure SDK to connect).')
+output keyVaultUri string = keyVault.properties.vaultUri
+
 @description('Resource ID of the User Assigned Managed Identity.')
 output userAssignedIdentityId string = uai.id
 
@@ -138,6 +158,7 @@ output result object = {
   ]
   values: {
     keyVaultId: keyVault.id
+    keyVaultUri: keyVault.properties.vaultUri
     userAssignedIdentityId: uai.id
     userAssignedIdentityClientId: uai.properties.clientId
     userAssignedIdentityPrincipalId: uai.properties.principalId
