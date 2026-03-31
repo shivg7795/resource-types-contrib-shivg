@@ -58,13 +58,13 @@ param vnetAddressPrefix string = '10.0.0.0/16'
 param subnetAddressPrefix string = '10.0.1.0/24'
 
 @description('Desired container count')
-param desiredCount int = 1
+param desiredCount int = 3
 
 @description('Availability zones')
 param zones array = []
 
 @description('Maintain desired count')
-param maintainDesiredCount bool = false
+param maintainDesiredCount bool = true
 
 @description('Inbound NAT Rule name')
 @maxLength(64)
@@ -241,7 +241,7 @@ resource natGateway 'Microsoft.Network/natGateways@2022-07-01' = {
         id: outboundPublicIP.id
       }
     ]
-  }  
+  }
   dependsOn: [
     outboundPublicIP
   ]
@@ -285,7 +285,7 @@ resource virtualNetwork 'Microsoft.Network/virtualNetworks@2022-07-01' = {
         type: 'Microsoft.Network/virtualNetworks/subnets'
       }
     ]
-    virtualNetworkPeerings: []    
+    virtualNetworkPeerings: []
     enableDdosProtection: true
     ddosProtectionPlan: {
       id: ddosProtectionPlan.id
@@ -405,7 +405,7 @@ resource loadBalancer 'Microsoft.Network/loadBalancers@2022-07-01' = {
     ]
     outboundRules: []
     inboundNatPools: []
-  }  
+  }
   dependsOn: [
     inboundPublicIP
     virtualNetwork
@@ -532,7 +532,7 @@ resource nGroups 'Microsoft.ContainerInstance/NGroups@2024-09-01-preview' = {
         }
       }
     ]
-  }  
+  }
   tags: {
     'reprovision.enabled': true
     'metadata.container.environmentVariable.orchestratorId': true
@@ -565,4 +565,3 @@ output readinessProbeId string = resourceProperties.?containers.?demo.?readiness
 output livenessProbeId string = resourceProperties.?containers.?demo.?livenessProbe != null
   ? resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, 'livenessProbe')
   : ''
-
