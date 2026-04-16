@@ -85,6 +85,28 @@ var resourceProperties = context.resource.properties ?? {}
 var resourceVolumes = resourceProperties.?volumes ?? {}
 var resolvedConnections = context.resource.?connections ?? {}
 
+// ---------------------------------------------------------------------------
+// Secrets connection – consume the UAI created by the Key Vault secrets recipe
+// No role assignment is created here – RBAC is owned by the secrets recipe,
+// which already grants "Key Vault Administrator" to the UAI on the vault.
+//
+// Radius wires connection data as:
+//   context.resource.connections.secrets.properties.status.computedValues.*
+// ---------------------------------------------------------------------------
+var secretsConn = contains(context.resource, 'connections') && contains(context.resource.connections, 'secrets') ? context.resource.connections.secrets : {}
+var secretsComputedValues = secretsConn.?properties.?status.?computedValues ?? {}
+var secretsUaiId = string(secretsComputedValues.?userAssignedIdentityId ?? '')
+var secretsUaiClientId = string(secretsComputedValues.?userAssignedIdentityClientId ?? '')
+var secretsKeyVaultUri = string(secretsComputedValues.?keyVaultUri ?? '')
+
+// Azure SDK env vars injected when a secrets connection is active.
+// AZURE_CLIENT_ID lets ManagedIdentityCredential pick the correct UAI.
+// AZURE_KEYVAULT_URI tells the app which vault to query.
+var secretsEnvVars = secretsUaiClientId != '' ? [
+  { name: 'AZURE_CLIENT_ID', value: secretsUaiClientId }
+  { name: 'AZURE_KEYVAULT_URI', value: secretsKeyVaultUri }
+] : []
+
 // Extract connection data from linked resources (merged with resource properties)
 var resourceConnections = context.resource.?connections ?? {}
 var connectionDefinitions = context.resource.properties.?connections ?? {}
@@ -97,26 +119,12 @@ var isSecretsResource = reduce(items(connectionDefinitions), {}, (acc, conn) => 
   '${conn.key}': contains(string(conn.value.?source ?? ''), 'Radius.Security/secrets')
 }))
 
-// Secrets connections to inject via envFrom.secretRef
-// The K8s secret name is the Radius resource name (last segment of the source ID)
-var secretsEnvFrom = reduce(items(resourceConnections), [], (acc, conn) => 
-  isSecretsResource[conn.key] && connectionDefinitions[conn.key].?disableDefaultEnvVars != true
-    ? concat(acc, [{
-        prefix: toUpper('CONNECTION_${conn.key}_')
-        secretRef: {
-          // Extract the secret name from the connection source (last segment of the resource ID)
-          name: last(split(string(connectionDefinitions[conn.key].source), '/'))
-        }
-      }])
-    : acc
-)
-
-// Build environment variables from non-secrets connections when not explicitly disabled via disableDefaultEnvVars
-// Secrets connections use envFrom.secretRef instead for cleaner injection
-// Each connection's resource properties become CONNECTION_<CONNECTION_NAME>_<PROPERTY_NAME>
+// Build environment variables from ALL connections (including secrets) when not explicitly disabled.
+// Unlike K8s which uses envFrom.secretRef for secrets connections, ACI does not support that mechanism.
+// Instead, secrets connection metadata (keyVaultUri, UAI client ID, etc.) is injected as plain env vars
+// so the container can use the Azure SDK with ManagedIdentityCredential to fetch secrets at runtime.
 var connectionEnvVars = reduce(items(resourceConnections), [], (acc, conn) => 
-  // Only process non-secrets connections here (secrets use envFrom)
-  !isSecretsResource[conn.key] && connectionDefinitions[conn.key].?disableDefaultEnvVars != true
+  connectionDefinitions[conn.key].?disableDefaultEnvVars != true
     ? concat(acc, 
         // Add resource properties directly from connection (excluding metadata properties)
         reduce(items(conn.value ?? {}), [], (envAcc, prop) => 
@@ -451,15 +459,24 @@ resource containerGroupProfile 'Microsoft.ContainerInstance/containerGroupProfil
                     }
                   ]
             },
-            (contains(resourceProperties.?containers.?demo ?? {}, 'env') || length(connectionEnvVars) > 0) ? {
+            // Add environment variables from container definition, connections, and secrets UAI
+            (contains(resourceProperties.?containers.?demo ?? {}, 'env') || length(connectionEnvVars) > 0 || length(secretsEnvVars) > 0) ? {
               environmentVariables: concat(
-                reduce(items(resourceProperties.?containers.?demo.?env ?? {}), [], (envAcc, envItem) => concat(envAcc, [
-                  {
-                    name: envItem.key
-                    value: envItem.value.?value ?? string(envItem.value)
-                  }
-                ])),
-                connectionEnvVars
+                // Container-defined env vars (handles both plain values and secretKeyRef)
+                // For secretKeyRef entries, ACI cannot natively resolve K8s-style secret references.
+                // Instead, inject the secretKeyRef metadata so the container can resolve via Key Vault SDK.
+                reduce(items(resourceProperties.?containers.?demo.?env ?? {}), [], (envAcc, envItem) => concat(envAcc, [{
+                  name: envItem.key
+                  value: contains(envItem.value, 'value') 
+                    ? string(envItem.value.value)
+                    : contains(envItem.value, 'valueFrom') && contains(envItem.value.valueFrom, 'secretKeyRef')
+                      ? string(envItem.value.valueFrom.secretKeyRef.key)
+                      : string(envItem.value)
+                }])),
+                // Connection-derived env vars (includes secrets connection metadata)
+                connectionEnvVars,
+                // Azure SDK env vars for secrets UAI (AZURE_CLIENT_ID, AZURE_KEYVAULT_URI)
+                secretsEnvVars
               )
             } : {}
           )
@@ -498,9 +515,15 @@ resource nGroups 'Microsoft.ContainerInstance/NGroups@2024-09-01-preview' = {
   name: nGroupsName
   location: resourceGroup().location
   zones: zones
-  identity: {
-    type: 'SystemAssigned'
-  }
+  // Run under the UAI created by the secrets recipe so containers can
+  // access Key Vault via ManagedIdentityCredential. Only set when a
+  // secrets connection provides a UAI.
+  identity: secretsUaiId != '' ? {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${secretsUaiId}': {}
+    }
+  } : null
   properties: {
     elasticProfile: {
       desiredCount: desiredCount
