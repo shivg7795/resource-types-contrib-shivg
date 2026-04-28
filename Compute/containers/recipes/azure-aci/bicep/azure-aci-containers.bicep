@@ -4,15 +4,15 @@ param apiVersion string = '2024-09-01-preview'
 
 @description('NGroups parameter name')
 @maxLength(64)
-param nGroupsParamName string = 'nGroups_resource_1'
+param nGroupsParamName string = 'ngroups-${uniqueString(resourceGroup().id)}'
 
 @description('Container Group Profile name')
 @maxLength(64)
-param containerGroupProfileName string = 'cgp_1'
+param containerGroupProfileName string = 'cgp-${uniqueString(resourceGroup().id)}'
 
 @description('Load Balancer name')
 @maxLength(64)
-param loadBalancerName string = 'slb_1'
+param loadBalancerName string = 'slb-${uniqueString(resourceGroup().id)}'
 
 @description('Backend Address Pool name')
 @maxLength(64)
@@ -20,7 +20,7 @@ param backendAddressPoolName string = 'bepool_1'
 
 @description('Virtual Network name')
 @maxLength(64)
-param vnetName string = 'vnet_1'
+param vnetName string = 'vnet-${uniqueString(resourceGroup().id)}'
 
 @description('Subnet name')
 @maxLength(64)
@@ -28,18 +28,18 @@ param subnetName string = 'subnet_1'
 
 @description('Network Security Group name')
 @maxLength(64)
-param networkSecurityGroupName string = 'nsg_1'
+param networkSecurityGroupName string = 'nsg-${uniqueString(resourceGroup().id)}'
 
 @description('Inbound Public IP name')
 @maxLength(64)
-param inboundPublicIPName string = 'inboundPublicIP'
+param inboundPublicIPName string = 'inboundPIP-${uniqueString(resourceGroup().id)}'
 
 @description('Outbound Public IP name')
 @maxLength(64)
-param outboundPublicIPName string = 'outboundPublicIP'
+param outboundPublicIPName string = 'outboundPIP-${uniqueString(resourceGroup().id)}'
 
 @description('NAT Gateway name')
-param natGatewayName string = 'natGateway1'
+param natGatewayName string = 'natgw-${uniqueString(resourceGroup().id)}'
 
 @description('Frontend IP name')
 @maxLength(64)
@@ -70,6 +70,12 @@ param maintainDesiredCount bool = true
 @maxLength(64)
 param inboundNatRuleName string = 'inboundNatRule'
 
+@description('Enable DDoS protection (limit: 1 plan per subscription per region)')
+param enableDdosProtection bool = false
+
+@description('Name of an existing DDoS protection plan (required when enableDdosProtection is true)')
+param ddosProtectionPlanName string = 'ddosProtectionPlan'
+
 @description('Radius ACI Container Context')
 param context object
 
@@ -80,7 +86,6 @@ var resourcePrefix = '/subscriptions/${subscription().subscriptionId}/resourceGr
 var loadBalancerApiVersion = '2022-07-01'
 var vnetApiVersion = '2022-07-01'
 var publicIPVersion = '2022-07-01'
-var ddosProtectionPlanName = 'ddosProtectionPlan'
 var resourceProperties = context.resource.properties ?? {}
 var resourceVolumes = resourceProperties.?volumes ?? {}
 var resolvedConnections = context.resource.?connections ?? {}
@@ -90,17 +95,14 @@ var resolvedConnections = context.resource.?connections ?? {}
 // No role assignment is created here – RBAC is owned by the secrets recipe,
 // which already grants "Key Vault Administrator" to the UAI on the vault.
 //
-// Radius wires connection data as:
-//   context.resource.connections.secrets.properties.status.computedValues.*
+// Radius wires connection data with full resource structure:
+//   context.resource.connections.<name>.properties.status.computedValues.<key>
+//   context.resource.connections.<name>.properties.status.secrets.<key>.Value
 // ---------------------------------------------------------------------------
 var secretsConn = contains(context.resource, 'connections') && contains(context.resource.connections, 'secrets') ? context.resource.connections.secrets : {}
-//var secretsComputedValues = secretsConn.?properties.?status.?computedValues ?? {}
-var secretsUaiId = string(secretsConn.?userAssignedIdentityId ?? '')
-var secretsUaiClientId = string(secretsConn.?userAssignedIdentityClientId ?? '')
-var secretsKeyVaultUri = string(secretsConn.?keyVaultUri ?? '')
-//var secretsUaiId = string(secretsComputedValues.?userAssignedIdentityId ?? '')
-//var secretsUaiClientId = string(secretsComputedValues.?userAssignedIdentityClientId ?? '')
-//var secretsKeyVaultUri = string(secretsComputedValues.?keyVaultUri ?? '')
+var secretsUaiId = string(secretsConn.?properties.?status.?computedValues.?userAssignedIdentityId ?? '')
+var secretsUaiClientId = string(secretsConn.?properties.?status.?computedValues.?userAssignedIdentityClientId ?? '')
+var secretsKeyVaultUri = string(secretsConn.?properties.?status.?computedValues.?keyVaultUri ?? '')
 
 // Azure SDK env vars injected when a secrets connection is active.
 // AZURE_CLIENT_ID lets ManagedIdentityCredential pick the correct UAI.
@@ -153,15 +155,18 @@ var connectionEnvVars = reduce(items(resourceConnections), [], (acc, conn) =>
 // Build ACI volumes - similar pattern to kubernetes-containers.bicep but
 // for ACI we resolve storage account details from computedValues/secrets
 // instead of PVC name, because ACI needs explicit Azure File credentials.
-var volumeItems = items(resourceVolumes)
+// Note: 'secretName' volumes (K8s-style secret mounts) are skipped for ACI —
+// secrets are accessed via env vars (AZURE_CLIENT_ID, AZURE_KEYVAULT_URI) instead.
+var volumeItems = filter(items(resourceVolumes), vol => contains(vol.value, 'persistentVolume') || contains(vol.value, 'emptyDir'))
+var aciVolumeNames = map(volumeItems, vol => vol.key)
 var aciVolumes = reduce(volumeItems, [], (acc, vol) => concat(acc, [
   union(
     { name: vol.key },
     contains(vol.value, 'persistentVolume') && contains(resolvedConnections, vol.key) ? {
       azureFile: {
-        shareName: string(resolvedConnections[vol.key].?status.?computedValues.shareName ?? '')
-        storageAccountName: string(resolvedConnections[vol.key].?status.?computedValues.storageAccountName ?? '')
-        storageAccountKey: string(resolvedConnections[vol.key].?status.?secrets.?storageAccountKey.Value ?? '')
+        shareName: string(resolvedConnections[vol.key].?properties.?status.?computedValues.?shareName ?? '')
+        storageAccountName: string(resolvedConnections[vol.key].?properties.?status.?computedValues.?storageAccountName ?? '')
+        storageAccountKey: string(resolvedConnections[vol.key].?properties.?status.?secrets.?storageAccountKey.?Value ?? '')
         readOnly: string(vol.value.persistentVolume.?accessMode ?? '') == 'ReadOnlyMany'
       }
     } : {},
@@ -182,10 +187,9 @@ var aciVolumeMounts = reduce(rawVolumeMounts, [], (acc, vm) => concat(acc, [
   )
 ]))
 
-// DDoS Protection Plan
-resource ddosProtectionPlan 'Microsoft.Network/ddosProtectionPlans@2022-07-01' = {
+// DDoS Protection Plan — use existing if already present (limit: 1 per subscription per region)
+resource ddosProtectionPlan 'Microsoft.Network/ddosProtectionPlans@2022-07-01' existing = if (enableDdosProtection) {
   name: ddosProtectionPlanName
-  location: resourceGroup().location
 }
 
 // Network Security Group
@@ -305,10 +309,10 @@ resource virtualNetwork 'Microsoft.Network/virtualNetworks@2022-07-01' = {
       }
     ]
     virtualNetworkPeerings: []
-    enableDdosProtection: true
-    ddosProtectionPlan: {
+    enableDdosProtection: enableDdosProtection
+    ddosProtectionPlan: enableDdosProtection ? {
       id: ddosProtectionPlan.id
-    }
+    } : null
   }
   dependsOn: [
     networkSecurityGroup
@@ -444,7 +448,9 @@ resource containerGroupProfile 'Microsoft.ContainerInstance/containerGroupProfil
             }])) : []
             resources: {
               requests: {
-                memoryInGB: (item.value.?resources.?requests.?memoryInMib ?? 1024) / 1024
+                // ACI memoryInGB must be positive; Bicep only does integer division,
+                // so enforce a minimum of 1 GiB for containers requesting < 1024 MiB.
+                memoryInGB: max(1, int(item.value.?resources.?requests.?memoryInMib ?? 1024) / 1024)
                 cpu: item.value.?resources.?requests.?cpu ?? json('1.0')
               }
             }
@@ -467,9 +473,9 @@ resource containerGroupProfile 'Microsoft.ContainerInstance/containerGroupProfil
               secretsEnvVars
             )
           } : {},
-          // Add volume mounts if they exist
+          // Add volume mounts if they exist (filter out mounts for unsupported volume types like secretName)
           contains(item.value, 'volumeMounts') ? {
-            volumeMounts: reduce(item.value.volumeMounts, [], (vmAcc, vm) => concat(vmAcc, [
+            volumeMounts: reduce(filter(item.value.volumeMounts, vm => contains(aciVolumeNames, vm.volumeName)), [], (vmAcc, vm) => concat(vmAcc, [
               union(
                 {
                   name: vm.volumeName
@@ -479,12 +485,13 @@ resource containerGroupProfile 'Microsoft.ContainerInstance/containerGroupProfil
               )
             ]))
           } : {},
-          // Add command if specified
-          contains(item.value, 'command') ? { command: item.value.command } : {},
-          // Add args if specified
-          contains(item.value, 'args') ? { args: item.value.args } : {},
-          // Add working directory if specified
-          contains(item.value, 'workingDir') ? { workingDir: item.value.workingDir } : {}
+          // Add command if specified (ACI does not support 'args' or 'workingDir' separately;
+          // merge command + args into a single 'command' array for ACI)
+          contains(item.value, 'command') ? {
+            command: contains(item.value, 'args')
+              ? concat(item.value.command, item.value.args)
+              : item.value.command
+          } : {}
         )
       }]))
       volumes: !empty(aciVolumes)
@@ -584,7 +591,7 @@ output outboundPublicIPId string = outboundPublicIP.id
 output inboundPublicIPFQDN string = inboundPublicIP.properties.dnsSettings.fqdn
 output natGatewayId string = natGateway.id
 output networkSecurityGroupId string = networkSecurityGroup.id
-output ddosProtectionPlanId string = ddosProtectionPlan.id
+output ddosProtectionPlanId string = enableDdosProtection ? ddosProtectionPlan.id : ''
 output containerGroupProfileId string = containerGroupProfile.id
 output nGroupsId string = nGroups.id
 output readinessProbeId string = firstContainerWithReadinessProbe != null ? resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, '${firstContainerWithReadinessProbe.key}-readinessProbe') : ''
