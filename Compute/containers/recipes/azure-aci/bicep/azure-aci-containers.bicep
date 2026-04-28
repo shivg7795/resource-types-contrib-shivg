@@ -94,10 +94,13 @@ var resolvedConnections = context.resource.?connections ?? {}
 //   context.resource.connections.secrets.properties.status.computedValues.*
 // ---------------------------------------------------------------------------
 var secretsConn = contains(context.resource, 'connections') && contains(context.resource.connections, 'secrets') ? context.resource.connections.secrets : {}
-var secretsComputedValues = secretsConn.?properties.?status.?computedValues ?? {}
-var secretsUaiId = string(secretsComputedValues.?userAssignedIdentityId ?? '')
-var secretsUaiClientId = string(secretsComputedValues.?userAssignedIdentityClientId ?? '')
-var secretsKeyVaultUri = string(secretsComputedValues.?keyVaultUri ?? '')
+//var secretsComputedValues = secretsConn.?properties.?status.?computedValues ?? {}
+var secretsUaiId = string(secretsConn.?userAssignedIdentityId ?? '')
+var secretsUaiClientId = string(secretsConn.?userAssignedIdentityClientId ?? '')
+var secretsKeyVaultUri = string(secretsConn.?keyVaultUri ?? '')
+//var secretsUaiId = string(secretsComputedValues.?userAssignedIdentityId ?? '')
+//var secretsUaiClientId = string(secretsComputedValues.?userAssignedIdentityClientId ?? '')
+//var secretsKeyVaultUri = string(secretsComputedValues.?keyVaultUri ?? '')
 
 // Azure SDK env vars injected when a secrets connection is active.
 // AZURE_CLIENT_ID lets ManagedIdentityCredential pick the correct UAI.
