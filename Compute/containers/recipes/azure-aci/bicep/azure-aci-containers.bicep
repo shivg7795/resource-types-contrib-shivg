@@ -61,14 +61,17 @@ param desiredCount int = 3
 @description('Maintain desired count')
 param maintainDesiredCount bool = true
 
+@description('When false, ignores context.resource.properties.platformOptions. Defaults to true.')
+param allowPlatformOptions bool = true
+
 @description('Enable DDoS protection (limit: 1 plan per subscription per region)')
 param enableDdosProtection bool = false
 
 @description('Name of an existing DDoS protection plan (required when enableDdosProtection is true)')
 param ddosProtectionPlanName string = 'ddosProtectionPlan'
 
-@description('Deployment location for all resources. Reads from platformOptions.location if provided.')
-param location string = context.resource.properties.?platformOptions.?location ?? resourceGroup().location
+@description('Base deployment location for all resources when platformOptions.location is not applied.')
+param location string = resourceGroup().location
 
 @description('Radius ACI Container Context')
 param context object
@@ -77,6 +80,7 @@ param context object
 var cgProfileName = containerGroupProfileName
 var nGroupsName = nGroupsParamName
 var resourceProperties = context.resource.properties ?? {}
+var hasPlatformOptions = resourceProperties.?platformOptions != null
 // ACI does not support Radius extensions.daprSidecar; this recipe intentionally
 // ignores any Dapr sidecar configuration provided via context.resource.properties.extensions.
 var resourceVolumes = resourceProperties.?volumes ?? {}
@@ -104,8 +108,12 @@ var secretsEnvVars = secretsUaiClientId != '' ? [
   { name: 'AZURE_KEYVAULT_URI', value: secretsKeyVaultUri }
 ] : []
 
-// Platform options - extract with contains() to avoid nullable chain issues
-var platformOptions = contains(resourceProperties, 'platformOptions') ? resourceProperties.platformOptions : {}
+// Platform options are applied only when allowPlatformOptions is true.
+var platformOptions = allowPlatformOptions && hasPlatformOptions ? resourceProperties.?platformOptions ?? {} : {}
+var effectiveLocation = allowPlatformOptions && platformOptions.?location != null ? string(platformOptions.location) : location
+var platformOptionsWarning = !allowPlatformOptions && hasPlatformOptions
+  ? 'Warning: allowPlatformOptions=false; recipe ignored context.resource.properties.platformOptions values.'
+  : ''
 var aciSku = contains(platformOptions, 'sku') && platformOptions.sku != null ? string(platformOptions.sku) : 'Standard'
 var isConfidential = toLower(aciSku) == 'confidential'
 var zones = isConfidential ? [] : []
@@ -182,7 +190,7 @@ resource ddosProtectionPlan 'Microsoft.Network/ddosProtectionPlans@2022-07-01' e
 // Network Security Group
 resource networkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2022-07-01' = {
   name: networkSecurityGroupName
-  location: location
+  location: effectiveLocation
   properties: {
     securityRules: [
       {
@@ -208,7 +216,7 @@ resource networkSecurityGroup 'Microsoft.Network/networkSecurityGroups@2022-07-0
 // Inbound Public IP
 resource inboundPublicIP 'Microsoft.Network/publicIPAddresses@2022-07-01' = {
   name: inboundPublicIPName
-  location: location
+  location: effectiveLocation
   sku: {
     name: 'Standard'
     tier: 'Regional'
@@ -224,7 +232,7 @@ resource inboundPublicIP 'Microsoft.Network/publicIPAddresses@2022-07-01' = {
 // Outbound Public IP
 resource outboundPublicIP 'Microsoft.Network/publicIPAddresses@2022-07-01' = {
   name: outboundPublicIPName
-  location: location
+  location: effectiveLocation
   sku: {
     name: 'Standard'
     tier: 'Regional'
@@ -240,7 +248,7 @@ resource outboundPublicIP 'Microsoft.Network/publicIPAddresses@2022-07-01' = {
 // NAT Gateway
 resource natGateway 'Microsoft.Network/natGateways@2022-07-01' = {
   name: natGatewayName
-  location: location
+  location: effectiveLocation
   sku: {
     name: 'Standard'
   }
@@ -260,7 +268,7 @@ resource natGateway 'Microsoft.Network/natGateways@2022-07-01' = {
 // Virtual Network
 resource virtualNetwork 'Microsoft.Network/virtualNetworks@2022-07-01' = {
   name: vnetName
-  location: location
+  location: effectiveLocation
   properties: {
     addressSpace: {
       addressPrefixes: [
@@ -310,7 +318,7 @@ resource virtualNetwork 'Microsoft.Network/virtualNetworks@2022-07-01' = {
 // Load Balancer
 resource loadBalancer 'Microsoft.Network/loadBalancers@2022-07-01' = {
   name: loadBalancerName
-  location: location
+  location: effectiveLocation
   sku: {
     name: 'Standard'
   }
@@ -412,12 +420,12 @@ resource loadBalancer 'Microsoft.Network/loadBalancers@2022-07-01' = {
 }
 
 // ContainerGroupProfile resource - Dev/Limited: supports ONLY a single container named 'demo'
-// Create default CGProfile when platformOptions is not provided else use the CGProfile resource provided by the customer.
+// Apply platformOptions only when allowPlatformOptions=true.
 // ACI does not support context.resource.properties.extensions.daprSidecar;
 // this recipe does not project Dapr sidecar settings into the deployed container group profile.
 resource containerGroupProfile 'Microsoft.ContainerInstance/containerGroupProfiles@2024-11-01-preview' = {
   name: cgProfileName
-  location: location
+  location: effectiveLocation
   properties: union(
     {
       sku: isConfidential ? 'Confidential' : 'Standard'
@@ -511,7 +519,7 @@ resource containerGroupProfile 'Microsoft.ContainerInstance/containerGroupProfil
 // NGroups
 resource nGroups 'Microsoft.ContainerInstance/NGroups@2024-11-01-preview' = {
   name: nGroupsName
-  location: location
+  location: effectiveLocation
   zones: zones
   // Run under the UAI created by the secrets recipe so containers can
   // access Key Vault via ManagedIdentityCredential. Only set when a
@@ -583,3 +591,4 @@ output containerGroupProfileId string = containerGroupProfile.id
 output nGroupsId string = nGroups.id
 output readinessProbeId string = firstContainerWithReadinessProbe != null ? resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, '${firstContainerWithReadinessProbe.key}-readinessProbe') : ''
 output livenessProbeId string = length(filter(containerItems, item => contains(item.value, 'livenessProbe') && item.value.livenessProbe != null)) > 0 ? resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, '${filter(containerItems, item => contains(item.value, 'livenessProbe') && item.value.livenessProbe != null)[0].key}-livenessProbe') : ''
+output platformOptionsWarning string = platformOptionsWarning
