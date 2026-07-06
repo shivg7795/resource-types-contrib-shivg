@@ -70,9 +70,6 @@ param enableDdosProtection bool = false
 @description('Name of an existing DDoS protection plan (required when enableDdosProtection is true)')
 param ddosProtectionPlanName string = 'ddosProtectionPlan'
 
-@description('Base deployment location for all resources when platformOptions.location is not applied.')
-param location string = resourceGroup().location
-
 @description('Radius ACI Container Context')
 param context object
 
@@ -109,11 +106,10 @@ var secretsEnvVars = secretsUaiClientId != '' ? [
 ] : []
 
 // Platform options are applied only when allowPlatformOptions is true.
+// When allowPlatformOptions is false, provided platformOptions are ignored.
+// Location is always resourceGroup().location; platformOptions.location is not supported by this recipe.
 var platformOptions = allowPlatformOptions && hasPlatformOptions ? resourceProperties.?platformOptions ?? {} : {}
-var effectiveLocation = allowPlatformOptions && platformOptions.?location != null ? string(platformOptions.location) : location
-var platformOptionsWarning = !allowPlatformOptions && hasPlatformOptions
-  ? 'Warning: allowPlatformOptions=false; recipe ignored context.resource.properties.platformOptions values.'
-  : ''
+var effectiveLocation = resourceGroup().location
 var aciSku = contains(platformOptions, 'sku') && platformOptions.sku != null ? string(platformOptions.sku) : 'Standard'
 var isConfidential = toLower(aciSku) == 'confidential'
 var zones = isConfidential ? [] : []
@@ -591,4 +587,3 @@ output containerGroupProfileId string = containerGroupProfile.id
 output nGroupsId string = nGroups.id
 output readinessProbeId string = firstContainerWithReadinessProbe != null ? resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, '${firstContainerWithReadinessProbe.key}-readinessProbe') : ''
 output livenessProbeId string = length(filter(containerItems, item => contains(item.value, 'livenessProbe') && item.value.livenessProbe != null)) > 0 ? resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, '${filter(containerItems, item => contains(item.value, 'livenessProbe') && item.value.livenessProbe != null)[0].key}-livenessProbe') : ''
-output platformOptionsWarning string = platformOptionsWarning
