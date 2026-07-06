@@ -117,14 +117,18 @@ var ccePolicy = contains(platformOptions, 'confidentialComputeProperties') && co
 
 // Extract container items from context
 var containerItems = items(context.resource.properties.?containers ?? {})
+// Containers with initContainer: true are placed in the ACI initContainers[] array;
+// regular containers go into the containers[] array.
+var regularContainerItems = filter(containerItems, item => item.value.?initContainer != true)
+var initContainerItems = filter(containerItems, item => item.value.?initContainer == true)
 
-// Derive the first container's first exposed port (used for ipAddress and LB rules)
-var firstContainerPorts = length(containerItems) > 0 && contains(containerItems[0].value, 'ports') ? items(containerItems[0].value.ports) : []
+// Derive the first regular container's first exposed port (used for ipAddress and LB rules)
+var firstContainerPorts = length(regularContainerItems) > 0 && contains(regularContainerItems[0].value, 'ports') ? items(regularContainerItems[0].value.ports) : []
 var containerConnectionPort = length(firstContainerPorts) > 0 ? firstContainerPorts[0].value.containerPort : 80
 
-// Find the first container with a readiness probe for load balancer probe reference
-var firstContainerWithReadinessProbe = length(filter(containerItems, item => contains(item.value, 'readinessProbe') && item.value.readinessProbe != null)) > 0 
-  ? filter(containerItems, item => contains(item.value, 'readinessProbe') && item.value.readinessProbe != null)[0]
+// Find the first regular container with a readiness probe for load balancer probe reference
+var firstContainerWithReadinessProbe = length(filter(regularContainerItems, item => contains(item.value, 'readinessProbe') && item.value.readinessProbe != null)) > 0 
+  ? filter(regularContainerItems, item => contains(item.value, 'readinessProbe') && item.value.readinessProbe != null)[0]
   : null
 
 // Extract connection data from linked resources (merged with resource properties)
@@ -339,7 +343,8 @@ resource loadBalancer 'Microsoft.Network/loadBalancers@2022-07-01' = {
         }
       }
     ]
-    probes: reduce(containerItems, [], (acc, item) => concat(acc, 
+    // Only regular containers have readiness/liveness probes; init containers are excluded.
+    probes: reduce(regularContainerItems, [], (acc, item) => concat(acc, 
       union(
         // Add readiness probe if exists for this container
         contains(item.value, 'readinessProbe') && item.value.readinessProbe != null ? [{
@@ -425,7 +430,9 @@ resource containerGroupProfile 'Microsoft.ContainerInstance/containerGroupProfil
   properties: union(
     {
       sku: isConfidential ? 'Confidential' : 'Standard'
-      containers: reduce(containerItems, [], (acc, item) => concat(acc, [{
+      // Init containers (initContainer: true) are placed in the separate initContainers[] array below.
+      // Regular containers only — init containers are excluded from this array.
+      containers: reduce(regularContainerItems, [], (acc, item) => concat(acc, [{
         name: item.key
         properties: union(
           {
@@ -476,6 +483,47 @@ resource containerGroupProfile 'Microsoft.ContainerInstance/containerGroupProfil
           // Note: ACI does not support Radius container properties `args` or `workingDir`.
           // If `args` is provided, merge command + args into a single ACI `command` array.
           // `workingDir` is ignored for this recipe.
+          contains(item.value, 'command') ? {
+            command: contains(item.value, 'args')
+              ? concat(item.value.command, item.value.args)
+              : item.value.command
+          } : {}
+        )
+      }]))
+      // Init containers run sequentially to completion before regular containers start.
+      // The ACI init container schema is a subset: supports command, environmentVariables,
+      // image, securityContext, and volumeMounts — but NOT ports, resources, livenessProbe,
+      // readinessProbe, or configMap.
+      initContainers: reduce(initContainerItems, [], (acc, item) => concat(acc, [{
+        name: item.key
+        properties: union(
+          {
+            image: item.value.image
+          },
+          // Env vars from container definition only (no connection env vars for init containers)
+          contains(item.value, 'env') ? {
+            environmentVariables: reduce(items(item.value.?env ?? {}), [], (envAcc, envItem) => concat(envAcc, [{
+              name: envItem.key
+              value: envItem.value.?value != null
+                ? string(envItem.value.value)
+                : envItem.value.?valueFrom.?secretKeyRef != null
+                  ? string(envItem.value.valueFrom.secretKeyRef.key)
+                  : string(envItem.value)
+            }]))
+          } : {},
+          // Volume mounts (filter out unsupported secretName volumes)
+          contains(item.value, 'volumeMounts') ? {
+            volumeMounts: reduce(filter(item.value.volumeMounts, vm => contains(aciVolumeNames, vm.volumeName)), [], (vmAcc, vm) => concat(vmAcc, [
+              union(
+                {
+                  name: vm.volumeName
+                  mountPath: vm.mountPath
+                },
+                (vm.?readOnly ?? false) == true ? { readOnly: true } : {}
+              )
+            ]))
+          } : {},
+          // Merge command + args into a single command array (args and workingDir not supported by ACI init containers)
           contains(item.value, 'command') ? {
             command: contains(item.value, 'args')
               ? concat(item.value.command, item.value.args)
@@ -586,4 +634,4 @@ output ddosProtectionPlanId string = enableDdosProtection ? ddosProtectionPlan.i
 output containerGroupProfileId string = containerGroupProfile.id
 output nGroupsId string = nGroups.id
 output readinessProbeId string = firstContainerWithReadinessProbe != null ? resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, '${firstContainerWithReadinessProbe.key}-readinessProbe') : ''
-output livenessProbeId string = length(filter(containerItems, item => contains(item.value, 'livenessProbe') && item.value.livenessProbe != null)) > 0 ? resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, '${filter(containerItems, item => contains(item.value, 'livenessProbe') && item.value.livenessProbe != null)[0].key}-livenessProbe') : ''
+output livenessProbeId string = length(filter(regularContainerItems, item => contains(item.value, 'livenessProbe') && item.value.livenessProbe != null)) > 0 ? resourceId('Microsoft.Network/loadBalancers/probes', loadBalancerName, '${filter(regularContainerItems, item => contains(item.value, 'livenessProbe') && item.value.livenessProbe != null)[0].key}-livenessProbe') : ''
